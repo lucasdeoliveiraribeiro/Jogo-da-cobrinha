@@ -1,0 +1,667 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <conio.h>
+#include <windows.h>
+#include <time.h>
+
+#define WIDTH 60
+#define HEIGHT 22
+#define TOP_OFFSET 2
+#define SPEED 140
+#define FRUIT_COUNT 5
+
+#define EMOJI_SNAKE "\xF0\x9F\x9F\xA2" /* 🟢 */
+#define EMOJI_FRUIT "\xF0\x9F\x8D\x8E" /* 🍎 */
+#define BLANK "  "                     /* 2 espaços apagam 1 emoji */
+
+#define STEP_X 2
+#define STEP_Y 1
+
+typedef struct Node
+{
+    int x, y;
+    struct Node *next;
+    struct Node *prev;
+} Node;
+
+typedef struct
+{
+    int x, y;
+} Fruit;
+
+static Node *head = NULL;
+static Node *tail = NULL;
+static Fruit fruits[FRUIT_COUNT];
+static int dirX = 0, dirY = 0;
+static int score = 0;
+static int gameOver = 0;
+static HANDLE hConsole;
+
+/* ================= UTIL ================= */
+
+static void setColor(int c) { SetConsoleTextAttribute(hConsole, c); }
+
+static void gotoxy(int x, int y)
+{
+    COORD c = {(SHORT)x, (SHORT)y};
+    SetConsoleCursorPosition(hConsole, c);
+}
+
+static void hideCursor(void)
+{
+    CONSOLE_CURSOR_INFO ci = {1, FALSE};
+    SetConsoleCursorInfo(hConsole, &ci);
+}
+
+/* ================= LISTA ================= */
+
+static void insert_head(int x, int y)
+{
+    Node *n = (Node *)malloc(sizeof(Node));
+    if (!n)
+        return;
+    n->x = x;
+    n->y = y;
+    n->next = head;
+    n->prev = NULL;
+    if (head)
+        head->prev = n;
+    head = n;
+    if (!tail)
+        tail = n;
+}
+
+static void remove_tail(void)
+{
+    if (!tail)
+        return;
+    Node *tmp = tail;
+    tail = tail->prev;
+    if (tail)
+        tail->next = NULL;
+    else
+        head = NULL;
+    free(tmp);
+}
+
+static void free_snake(void)
+{
+    Node *cur = head;
+    while (cur)
+    {
+        Node *nxt = cur->next;
+        free(cur);
+        cur = nxt;
+    }
+    head = tail = NULL;
+}
+
+/* ================= DETECCAO ================= */
+
+static int collision(int x, int y)
+{
+    if (x < STEP_X || x >= WIDTH || y <= TOP_OFFSET || y >= HEIGHT + TOP_OFFSET)
+        return 1;
+    for (Node *t = head->next; t; t = t->next)
+        if (t->x == x && t->y == y)
+            return 1;
+    return 0;
+}
+
+static int snake_on_position(int x, int y)
+{
+    for (Node *t = head; t; t = t->next)
+        if (t->x == x && t->y == y)
+            return 1;
+    return 0;
+}
+
+/* ================= RENDERIZACAO ================= */
+
+static void draw_border(void)
+{
+    setColor(9);
+    for (int i = 0; i <= WIDTH; i++)
+    {
+        gotoxy(i, TOP_OFFSET);
+        printf("_");
+        gotoxy(i, HEIGHT + TOP_OFFSET);
+        printf("_");
+    }
+    for (int i = TOP_OFFSET; i <= HEIGHT + TOP_OFFSET; i++)
+    {
+        gotoxy(0, i);
+        printf("|");
+        gotoxy(WIDTH, i);
+        printf("|");
+    }
+    setColor(7);
+}
+
+static void draw_score(void)
+{
+    setColor(14);
+    gotoxy(2, 0);
+    printf("𝕊ℕ𝔸𝕂𝔼");
+    printf("\n 𝕊𝕔𝕠𝕣𝕖: %d   ", score);
+    setColor(7);
+}
+
+static void draw_snake(void)
+{
+    for (Node *t = head; t; t = t->next)
+    {
+        gotoxy(t->x, t->y);
+        printf(EMOJI_SNAKE);
+    }
+}
+
+/* ================= FRUTAS ================= */
+
+static void draw_fruit(int i)
+{
+    gotoxy(fruits[i].x, fruits[i].y);
+    printf(EMOJI_FRUIT);
+}
+
+static void generate_fruit(int i)
+{
+    do
+    {
+        int col = rand() % ((WIDTH - 2) / STEP_X);
+        fruits[i].x = col * STEP_X + STEP_X;
+        fruits[i].y = rand() % (HEIGHT - 1) + 1 + TOP_OFFSET;
+    } while (snake_on_position(fruits[i].x, fruits[i].y));
+    draw_fruit(i);
+}
+
+static void init_fruits(void)
+{
+    for (int i = 0; i < FRUIT_COUNT; i++)
+        generate_fruit(i);
+}
+
+/* ================= INPUT ================= */
+
+static void input(void)
+{
+    if (!_kbhit())
+        return;
+    int key = _getch();
+    if (key != 224)
+        return;
+    key = _getch();
+    switch (key)
+    {
+    case 72:
+        if (dirY != STEP_Y)
+        {
+            dirX = 0;
+            dirY = -STEP_Y;
+        }
+        break;
+    case 80:
+        if (dirY != -STEP_Y)
+        {
+            dirX = 0;
+            dirY = STEP_Y;
+        }
+        break;
+    case 75:
+        if (dirX != STEP_X)
+        {
+            dirX = -STEP_X;
+            dirY = 0;
+        }
+        break;
+    case 77:
+        if (dirX != -STEP_X)
+        {
+            dirX = STEP_X;
+            dirY = 0;
+        }
+        break;
+    }
+}
+
+/* ================= LOGICA ================= */
+
+static void update(void)
+{
+    if (!dirX && !dirY)
+        return;
+
+    int newX = head->x + dirX;
+    int newY = head->y + dirY;
+
+    if (collision(newX, newY))
+    {
+        gameOver = 1;
+        return;
+    }
+
+    int ateFruit = 0;
+    for (int i = 0; i < FRUIT_COUNT; i++)
+    {
+        if (newX == fruits[i].x && newY == fruits[i].y)
+        {
+            score += 10;
+            ateFruit = 1;
+            generate_fruit(i);
+            break;
+        }
+    }
+
+    if (!ateFruit)
+    {
+        gotoxy(tail->x, tail->y);
+        printf(BLANK);
+        remove_tail();
+    }
+
+    insert_head(newX, newY);
+    draw_snake();
+    for (int i = 0; i < FRUIT_COUNT; i++)
+        draw_fruit(i);
+    draw_score();
+}
+
+/* ================= RESET ================= */
+
+static void reset_game(void)
+{
+    free_snake();
+    dirX = 0;
+    dirY = 0;
+    score = 0;
+    gameOver = 0;
+    system("cls");
+    int startX = (WIDTH / 2 / STEP_X) * STEP_X;
+    insert_head(startX, HEIGHT / 2 + TOP_OFFSET);
+    draw_border();
+    init_fruits();
+    draw_snake();
+    draw_score();
+}
+
+/* ================= GAME OVER ================= */
+
+static int show_game_over(void)
+{
+    Sleep(500);
+    system("cls");
+
+    int midX = WIDTH / 2 - 13;
+    int midY = 8;
+
+    setColor(9);
+    gotoxy(midX, midY);
+    printf("=======================================================");
+
+    setColor(12);
+    gotoxy(midX + 5, midY + 2);
+    
+    printf(" ██████╗  █████╗ ███╗   ███╗███████╗██████╗      ██████╗ ██╗   ██╗███████╗██████╗     ██╗   ██╗ █████╗  ██████╗██╗██╗      █████╗  ██████╗\n");
+    printf("██╔════╝ ██╔══██╗████╗ ████║██╔════╝██╔══██╗    ██╔═══██╗██║   ██║██╔════╝██╔══██╗    ██║   ██║██╔══██╗██╔════╝██║██║     ██╔══██╗██╔═══██╗\n");
+    printf("██║  ███╗███████║██╔████╔██║█████╗  ██████╔╝    ██║   ██║██║   ██║█████╗  ██████╔╝    ██║   ██║███████║██║     ██║██║     ███████║██║   ██║\n");
+    printf("██║   ██║██╔══██║██║╚██╔╝██║██╔══╝  ██╔══██╗    ██║   ██║╚██╗ ██╔╝██╔══╝  ██╔══██╗    ╚██╗ ██╔╝██╔══██║██║     ██║██║     ██╔══██║██║   ██║\n");
+    printf("╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗██║  ██║    ╚██████╔╝ ╚████╔╝ ███████╗██║  ██║     ╚████╔╝ ██║  ██║╚██████╗██║███████╗██║  ██║╚██████╔╝\n");
+    printf(" ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝     ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝      ╚═══╝  ╚═╝  ╚═╝ ╚═════╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ \n");
+
+    setColor(14);
+    gotoxy(midX + 6, midY + 4);
+    printf("ℙ𝕠𝕟𝕥𝕦𝕒𝕔𝕒𝕠: %d", score);
+
+    setColor(10);
+    gotoxy(midX + 3, midY + 6);
+    printf("[ 𝔼ℕ𝕋𝔼ℝ ] 𝕁𝕠𝕘𝕒𝕣 𝕟𝕠𝕧𝕒𝕞𝕖𝕟𝕥𝕖");
+
+    setColor(7);
+    gotoxy(midX + 3, midY + 7);
+    printf("[ 𝔼𝕊ℂ ] 𝕄𝕖𝕟𝕦 𝕡𝕣𝕚𝕟𝕔𝕚𝕡𝕒𝕝");
+
+    setColor(9);
+    gotoxy(midX, midY + 9);
+    printf("=======================================================");
+
+    setColor(7);
+
+    while (1)
+    {
+        int key = _getch();
+        if (key == 13)
+            return 1; /* ENTER -> reinicia */
+        if (key == 27)
+            return 0; /* ESC   -> menu     */
+    }
+}
+
+/* ================= TELAS DO MENU ================= */
+
+/* Utilitario: imprime texto quebrado em linhas de max 'maxcols' caracteres */
+static void print_wrapped(int x, int *row, const char *text, int maxcols)
+{
+    char buf[256];
+    int len = 0;
+    const char *p = text;
+
+    while (*p)
+    {
+        /* Encontra o fim da proxima palavra */
+        const char *word_end = p;
+        while (*word_end && *word_end != ' ')
+            word_end++;
+
+        int word_len = (int)(word_end - p);
+
+        /* Se a palavra nao cabe na linha atual, quebra */
+        if (len > 0 && len + 1 + word_len > maxcols)
+        {
+            buf[len] = '\0';
+            gotoxy(x, *row);
+            printf("%s", buf);
+            (*row)++;
+            len = 0;
+        }
+
+        /* Adiciona espaco separador se nao for inicio da linha */
+        if (len > 0)
+            buf[len++] = ' ';
+
+        /* Copia a palavra */
+        for (int i = 0; i < word_len && len < 254; i++)
+            buf[len++] = p[i];
+
+        p = word_end;
+        while (*p == ' ')
+            p++; /* pula espacos */
+    }
+
+    /* Imprime o que sobrou */
+    if (len > 0)
+    {
+        buf[len] = '\0';
+        gotoxy(x, *row);
+        printf("%s", buf);
+        (*row)++;
+    }
+}
+
+/* Tela Sobre o jogo */
+static void show_about(void)
+{
+    system("cls");
+    int midX = WIDTH / 2 - 13;
+    int midY = 5;
+
+    setColor(9);
+    gotoxy(midX, midY);
+    printf("===========================================");
+
+    setColor(14);
+    gotoxy(midX + 9, midY + 2);
+    printf("\xF0\x9F\x93\x96  ℂ 𝕆 𝕄 𝕆   𝕁 𝕆 𝔾 𝔸 ℝ");
+
+    setColor(7);
+    gotoxy(midX + 2, midY + 4);
+    printf("\xF0\x9F\x9F\xA2  ℂ𝕠𝕓𝕣𝕒 : 𝕖𝕞𝕠𝕛𝕚𝕤 𝕔𝕠𝕝𝕠𝕣𝕚𝕕𝕠𝕤");
+    gotoxy(midX + 2, midY + 5);
+    printf("\xF0\x9F\x8D\x8E  𝔽𝕣𝕦𝕥𝕒 : 𝕔𝕠𝕞𝕒 𝕡𝕒𝕣𝕒 𝕔𝕣𝕖𝕤𝕔𝕖𝕣");
+    gotoxy(midX + 2, midY + 6);
+    printf("\xE2\xAC\x86\xEF\xB8\x8F  𝕊𝕖𝕥𝕒𝕤 : 𝕞𝕠𝕧𝕚𝕞𝕖𝕟𝕥𝕒𝕣 𝕒 𝕔𝕠𝕓𝕣𝕒");
+    gotoxy(midX + 2, midY + 7);
+    printf("\xF0\x9F\x92\xA5  𝕊𝕖𝕥𝕒𝕤 : 𝕞𝕠𝕧𝕚𝕞𝕖𝕟𝕥𝕒𝕣 𝕒 𝕔𝕠𝕓𝕣𝕒");
+
+    setColor(10);
+    gotoxy(midX + 2, midY + 9);
+    printf("ℂ𝕒𝕕𝕒 𝕗𝕣𝕦𝕥𝕒 𝕧𝕒𝕝𝕖 𝟙𝟘 𝕡𝕠𝕟𝕥𝕠𝕤!");
+
+    setColor(9);
+    gotoxy(midX, midY + 11);
+    printf("================================");
+
+    setColor(8);
+    gotoxy(midX + 6, midY + 13);
+    printf("ℙ𝕣𝕖𝕤𝕤𝕚𝕠𝕟𝕖 𝔼𝕊ℂ 𝕡𝕒𝕣𝕒 𝕧𝕠𝕝𝕥𝕒𝕣");
+    setColor(7);
+
+    while (_getch() != 27)
+        ;
+}
+
+/* Tela Sobre Mim — texto completo com quebra automatica de linha */
+static void show_about_me(void)
+{
+    system("cls");
+
+    int x = 4;     /* margem esquerda */
+    int row = 2;   /* linha inicial   */
+    int cols = 72; /* largura max da linha */
+
+    setColor(9);
+    gotoxy(x, row++);
+    printf("========================================================================");
+    row++;
+
+    setColor(14);
+    gotoxy(x + 25, row++);
+    printf("\xF0\x9F\x91\xA4  𝕊 𝕆 𝔹 ℝ 𝔼   𝕄 𝕀 𝕄");
+    row++;
+
+    setColor(7);
+    print_wrapped(x, &row, "Me chamo Lucas e sou estudante do segundo semestre de Engenharia de Software pela Unicesumar. Minha trajetoria na area de tecnologia e marcada por dedicacao, curiosidade e busca constante por aprendizado.", cols);
+    row++;
+
+    print_wrapped(x, &row, "Minha jornada comecou em 2022, quando iniciei o curso tecnico em Analise e Desenvolvimento de Sistemas pelo SENAI. Conclui minha formacao em 2024, periodo em que desenvolvi conhecimentos importantes em logica de programacao, desenvolvimento de sistemas, criacao e gerenciamento de bancos de dados, alem de fundamentos de eletronica. Essa fase foi essencial para construir minha base na area de tecnologia.", cols);
+    row++;
+
+    print_wrapped(x, &row, "Apos concluir o curso tecnico, continuei meus estudos de forma independente, buscando aprimorar minhas habilidades por meio de cursos e conteudos online. Em 2025, iniciei minha graduacao em Engenharia de Software pela Unicesumar, onde venho aprofundando meus conhecimentos e evoluindo academicamente.", cols);
+    row++;
+
+    print_wrapped(x, &row, "Atualmente, sigo em constante busca por aprimoramento, com o objetivo de expandir meus conhecimentos e me preparar cada vez mais para o mercado de trabalho na area de tecnologia. Tenho como meta construir uma carreira solida, contribuindo com solucoes inovadoras e crescendo profissionalmente.", cols);
+    row++;
+
+    setColor(11);
+    print_wrapped(x, &row, "Este projeto foi desenvolvido no contexto da disciplina de Estrutura de Dados, ministrada pela professora Thayse Duarte de Oliveira, sendo parte importante do meu processo de aprendizagem.", cols);
+    row++;
+
+    setColor(9);
+    gotoxy(x, row++);
+    printf("========================================================================");
+
+    setColor(8);
+    gotoxy(x + 26, row + 1);
+    printf("ℙ𝕣𝕖𝕤𝕤𝕚𝕠𝕟𝕖 𝔼𝕊ℂ 𝕡𝕒𝕣𝕒 𝕧𝕠𝕝𝕥𝕒𝕣");
+    setColor(7);
+
+    while (_getch() != 27)
+        ;
+}
+
+/* ================= MENU PRINCIPAL ================= */
+
+/* Opcoes: 0=Jogar, 1=Sobre, 2=Sobre Mim, 3=Sair */
+#define MENU_ITEMS 4
+
+static void draw_menu(int selected)
+{
+    system("cls");
+
+    int midX = WIDTH / 2 - 13;
+    int midY = 3;
+
+    setColor(10);
+
+    printf(" ███████╗███╗   ██╗ █████╗ ██╗  ██╗███████╗     ██████╗  █████╗ ███╗   ███╗███████╗██████╗ \n");
+    printf(" ██╔════╝████╗  ██║██╔══██╗██║ ██╔╝██╔════╝    ██╔════╝ ██╔══██╗████╗ ████║██╔════╝██╔══██╗\n");
+    printf(" ███████╗██╔██╗ ██║███████║█████╔╝ █████╗      ██║  ███╗███████║██╔████╔██║█████╗  ██████╔╝\n");
+    printf(" ╚════██║██║╚██╗██║██╔══██║██╔═██╗ ██╔══╝      ██║   ██║██╔══██║██║╚██╔╝██║██╔══╝  ██╔══██╗\n");
+    printf(" ███████║██║ ╚████║██║  ██║██║  ██╗███████╗    ╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗██║  ██║\n");
+    printf(" ╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝     ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝\n");
+
+    setColor(9);
+    gotoxy(midX, midY + 6);
+    printf("======================================================");
+
+    /* --- Jogar --- */
+    if (selected == 0)
+    {
+        setColor(10);
+        gotoxy(midX + 7, midY + 8);
+        printf("> \xF0\x9F\x8E\xAE  𝕁 𝕆 𝔾 𝔸 ℝ <");
+    }
+    else
+    {
+        setColor(7);
+        gotoxy(midX + 7, midY + 8);
+        printf("> \xF0\x9F\x8E\xAE  𝕁 𝕆 𝔾 𝔸 ℝ <");
+    }
+
+    /* --- Sobre --- */
+    if (selected == 1)
+    {
+        setColor(10);
+        gotoxy(midX + 7, midY + 10);
+        printf("> \xF0\x9F\x93\x96  ℂ 𝕆 𝕄 𝕆   𝕁 𝕆 𝔾 𝔸 ℝ <");
+    }
+    else
+    {
+        setColor(7);
+        gotoxy(midX + 7, midY + 10);
+        printf("> \xF0\x9F\x93\x96  ℂ 𝕆 𝕄 𝕆   𝕁 𝕆 𝔾 𝔸 ℝ <");
+    }
+
+    /* --- Sobre Mim --- */
+    if (selected == 2)
+    {
+        setColor(10);
+        gotoxy(midX + 7, midY + 12);
+        printf("> \xF0\x9F\x91\xA4  𝕊 𝕆 𝔹 ℝ 𝔼   𝕄 𝕀 𝕄 <");
+    }
+    else
+    {
+        setColor(7);
+        gotoxy(midX + 7, midY + 12);
+        printf("> \xF0\x9F\x91\xA4  𝕊 𝕆 𝔹 ℝ 𝔼   𝕄 𝕀 𝕄 <");
+    }
+
+    /* --- Sair --- */
+    if (selected == 3)
+    {
+        setColor(12);
+        gotoxy(midX + 7, midY + 14);
+        printf("> \xF0\x9F\x9A\xAA  𝕊 𝔸 𝕀 ℝ <");
+    }
+    else
+    {
+        setColor(7);
+        gotoxy(midX + 7, midY + 14);
+        printf("> \xF0\x9F\x9A\xAA  𝕊 𝔸 𝕀 ℝ <");
+    }
+
+    setColor(9);
+    gotoxy(midX, midY + 16);
+    printf("======================================================");
+
+    setColor(8);
+    gotoxy(midX + 2, midY + 18);
+    printf("𝕊𝕖𝕥𝕒𝕤 𝕡𝕒𝕣𝕒 𝕟𝕒𝕧𝕖𝕘𝕒𝕣  |  𝔼ℕ𝕋𝔼ℝ 𝕡𝕒𝕣𝕒 𝕔𝕠𝕟𝕗𝕚𝕣𝕞𝕒𝕣");
+
+    setColor(7);
+}
+
+/* Retorna 0 se deve jogar, 1 se deve sair */
+static int show_menu(void)
+{
+    int selected = 0;
+    draw_menu(selected);
+
+    while (1)
+    {
+        int key = _getch();
+
+        if (key == 224)
+        {
+            key = _getch();
+            if (key == 72)
+            { /* seta cima  */
+                selected = (selected - 1 + MENU_ITEMS) % MENU_ITEMS;
+                draw_menu(selected);
+            }
+            if (key == 80)
+            { /* seta baixo */
+                selected = (selected + 1) % MENU_ITEMS;
+                draw_menu(selected);
+            }
+        }
+
+        if (key == 13)
+        { /* ENTER */
+            if (selected == 0)
+                return 0; /* Jogar     */
+            if (selected == 1)
+            {
+                show_about();
+                draw_menu(selected);
+            }
+            if (selected == 2)
+            {
+                show_about_me();
+                draw_menu(selected);
+            }
+            if (selected == 3)
+                return 1; /* Sair      */
+        }
+
+        if (key == 27)
+            return 1; /* ESC = sair */
+    }
+}
+
+/* ================= MAIN ================= */
+
+int main(void)
+{
+    SetConsoleOutputCP(65001);
+    SetConsoleCP(65001);
+
+    hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    srand((unsigned)time(NULL));
+    hideCursor();
+
+    int quit = 0;
+
+    while (!quit)
+    {
+        if (show_menu() == 1)
+        {
+            quit = 1;
+            break;
+        }
+
+        /* Partida */
+        do
+        {
+            reset_game();
+            while (!gameOver)
+            {
+                input();
+                update();
+                Sleep(SPEED);
+            }
+        } while (show_game_over()); /* ENTER = nova partida, ESC = volta ao menu */
+    }
+
+    /* Tela de saida */
+    system("cls");
+    setColor(14);
+    gotoxy(WIDTH / 2 - 10, 10);
+    printf("\xF0\x9F\x91\x8B  𝕆𝕓𝕣𝕚𝕘𝕒𝕕𝕠 𝕡𝕠𝕣 𝕛𝕠𝕘𝕒𝕣");
+    setColor(7);
+    gotoxy(WIDTH / 2 - 10, 12);
+    printf("ℙ𝕣𝕖𝕤𝕤𝕚𝕠𝕟𝕖 𝕢𝕦𝕒𝕝𝕢𝕦𝕖𝕣 𝕥𝕖𝕔𝕝𝕒...");
+    _getch();
+
+    free_snake();
+    return 0;
+}
